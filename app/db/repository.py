@@ -196,6 +196,19 @@ class OutboxRepository:
         )
         return [OutboxEvent.from_row(r) for r in rows]
 
+    async def oldest_replayable_seq(self) -> int | None:
+        """Lowest stream_seq still on disk, or None if nothing is retained.
+
+        Used to detect a client whose cursor has fallen off the end of the
+        retention window. Returning None means there is nothing to replay at
+        all, which is indistinguishable from a fresh system -- and in both
+        cases refusing the connection would be wrong.
+        """
+        value = await self._pool.fetchval(
+            "SELECT min(stream_seq) FROM outbox WHERE stream_seq IS NOT NULL"
+        )
+        return int(value) if value is not None else None
+
     async def current_stream_seq(self) -> int:
         """Highest published cursor, or 0 if nothing has been published yet."""
         value = await self._pool.fetchval(

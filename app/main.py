@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await app.state.hub.shutdown()
         await app.state.dispatcher.stop()
         await close_pool(app.state.pool)
         logger.info("application stopped")
@@ -41,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Transactional Outbox Service",
-        version="0.2.0",
+        version="0.3.0",
         description=(
             "CRUD over PostgreSQL with a transactional outbox. Events are written "
             "in the same transaction as the data and streamed to WebSocket clients "

@@ -1,7 +1,6 @@
-"""Health and diagnostics endpoints."""
-
 from __future__ import annotations
 
+import os
 import uuid
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -18,19 +17,30 @@ async def health(
 ) -> HealthResponse:
     try:
         await pool.fetchval("SELECT 1")
-    except Exception: 
+    except Exception:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return HealthResponse(status="degraded", database="unreachable")
 
     hub = getattr(request.app.state, "hub", None)
     dispatcher = getattr(request.app.state, "dispatcher", None)
 
+    pending = await outbox.count_unpublished()
+    head = await outbox.current_stream_seq()
+    cursor = dispatcher.cursor if dispatcher else None
+
     return HealthResponse(
         status="ok",
         database="ok",
-        outbox_pending=await outbox.count_unpublished(),
+        worker_pid=os.getpid(),
+        outbox_pending=pending,
+        stream_head=head,
+        tailer_cursor=cursor,
+        tailer_lag=(head - cursor) if cursor is not None else None,
         stream_subscribers=hub.subscriber_count if hub else None,
         dispatcher_running=dispatcher.is_running if dispatcher else None,
+        retention_running=(
+            dispatcher.retention.is_running if dispatcher else None
+        ),
     )
 
 

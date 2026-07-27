@@ -78,9 +78,14 @@ class OutboxEventRead(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     database: str
+    worker_pid: int | None = None
     outbox_pending: int | None = None
+    stream_head: int | None = None
+    tailer_cursor: int | None = None
+    tailer_lag: int | None = None
     stream_subscribers: int | None = None
     dispatcher_running: bool | None = None
+    retention_running: bool | None = None
 
 
 class ErrorResponse(BaseModel):

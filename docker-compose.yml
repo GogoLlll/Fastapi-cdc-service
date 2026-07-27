@@ -8,7 +8,7 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "max_connections=200"
+      - "max_connections=300"
       - "-c"
       - "shared_buffers=256MB"
     ports:
@@ -31,12 +31,16 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-outbox}
       DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-10}
       DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-40}
+      OUTBOX_RETENTION_HOURS: ${OUTBOX_RETENTION_HOURS:-24}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_WORKERS: ${APP_WORKERS:-1}
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "${APP_WORKERS:-1}"]
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
       interval: 5s

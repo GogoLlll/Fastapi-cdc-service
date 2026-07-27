@@ -19,39 +19,27 @@ class Settings(BaseSettings):
     postgres_user: str = "outbox"
     postgres_password: str = "outbox"
     postgres_db: str = "outbox"
-
-    # --- Connection pool ---
-    # Pool size is the real concurrency limiter for writes. Keep it well below
-    # Postgres `max_connections`. The dispatcher holds one dedicated connection
-    # for LISTEN outside of this pool.
     db_pool_min_size: int = 10
     db_pool_max_size: int = 40
     db_command_timeout: float = 10.0
 
-    # --- Dispatcher ---
-    # How many events one dispatcher iteration claims and publishes. Larger
-    # batches amortise round trips; smaller batches keep tail latency down.
     dispatcher_batch_size: int = 256
-    # Safety-net poll. LISTEN/NOTIFY is the fast path; this interval only
-    # bounds the damage if a notification is ever missed (dropped connection,
-    # notify queue overflow). It is the worst-case latency, not the typical one.
     dispatcher_poll_interval: float = 0.2
-    # Backoff after a dispatcher error before retrying, in seconds.
     dispatcher_error_backoff: float = 1.0
 
-    # --- Streaming ---
-    # Per-subscriber send queue. A client that cannot keep up fills its queue
-    # and gets disconnected; it then reconnects and replays from its cursor.
-    # Nothing is silently dropped.
+    tailer_batch_size: int = 512
+    tailer_poll_interval: float = 0.2
+    outbox_retention_enabled: bool = True
+    outbox_retention_hours: int = 24
+    outbox_retention_interval: float = 300.0
+    outbox_retention_batch: int = 5000
     stream_queue_size: int = 1000
-    # Max events returned in one replay page when a client reconnects.
     stream_replay_batch_size: int = 500
-    # Ping interval to keep idle connections and proxies alive, in seconds.
     stream_heartbeat_interval: float = 30.0
 
-    # --- App ---
     app_host: str = "0.0.0.0"
     app_port: int = 8000
+    app_workers: int = 1
     log_level: str = "INFO"
 
     @property

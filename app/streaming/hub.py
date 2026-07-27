@@ -7,9 +7,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+SHUTDOWN_SENTINEL: dict[str, Any] = {"__control__": "shutdown"}
 
-class SubscriberOverflow(Exception):
-    """Raised on the subscriber's own task when its queue overflowed"""
+
+def is_shutdown(envelope: dict[str, Any]) -> bool:
+    return envelope is SHUTDOWN_SENTINEL
 
 
 class Subscriber:
@@ -48,6 +50,12 @@ class Subscriber:
             self._overflowed = True
             return False
 
+    def interrupt(self) -> None:
+        try:
+            self.queue.put_nowait(SHUTDOWN_SENTINEL)
+        except asyncio.QueueFull:
+            self._overflowed = True
+
     async def next_event(self, timeout: float) -> dict[str, Any] | None:
         try:
             return await asyncio.wait_for(self.queue.get(), timeout=timeout)
@@ -56,15 +64,19 @@ class Subscriber:
 
 
 class StreamHub:
-
     def __init__(self, *, queue_size: int) -> None:
         self._queue_size = queue_size
         self._subscribers: dict[uuid.UUID, Subscriber] = {}
         self._lock = asyncio.Lock()
+        self._shutting_down = False
 
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    @property
+    def shutting_down(self) -> bool:
+        return self._shutting_down
 
     async def subscribe(
         self, *, aggregate_id: uuid.UUID | None = None, cursor: int = 0
@@ -108,3 +120,14 @@ class StreamHub:
                     )
                     break
                 subscriber.cursor = envelope["stream_seq"]
+
+    async def shutdown(self) -> None:
+        self._shutting_down = True
+        async with self._lock:
+            subscribers = list(self._subscribers.values())
+
+        for subscriber in subscribers:
+            subscriber.interrupt()
+
+        if subscribers:
+            logger.info("signalled %d subscribers to close", len(subscribers))
