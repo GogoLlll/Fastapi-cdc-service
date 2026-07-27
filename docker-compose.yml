@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-outbox}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-outbox}
+      POSTGRES_DB: ${POSTGRES_DB:-outbox}
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-outbox} -d ${POSTGRES_DB:-outbox}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-outbox}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-outbox}
+      POSTGRES_DB: ${POSTGRES_DB:-outbox}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-10}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-40}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
