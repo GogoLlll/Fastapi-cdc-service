@@ -13,7 +13,6 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- PostgreSQL ---
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "outbox"
@@ -25,10 +24,13 @@ class Settings(BaseSettings):
 
     dispatcher_batch_size: int = 256
     dispatcher_poll_interval: float = 0.2
+    dispatcher_debounce: float = 0.005
     dispatcher_error_backoff: float = 1.0
 
     tailer_batch_size: int = 512
     tailer_poll_interval: float = 0.2
+    tailer_debounce: float = 0.005
+
     outbox_retention_enabled: bool = True
     outbox_retention_hours: int = 24
     outbox_retention_interval: float = 300.0

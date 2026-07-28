@@ -85,14 +85,19 @@ class OutboxPublisher:
                 await asyncio.sleep(self._settings.dispatcher_error_backoff)
 
     async def _wait_for_signal(self) -> None:
+        woken_by_notify = True
         try:
             await asyncio.wait_for(
                 self._wakeup.wait(), timeout=self._settings.dispatcher_poll_interval
             )
         except asyncio.TimeoutError:
-            pass
+            woken_by_notify = False
         finally:
             self._wakeup.clear()
+
+        debounce = self._settings.dispatcher_debounce
+        if woken_by_notify and debounce > 0:
+            await asyncio.sleep(debounce)
 
     async def _ensure_connection(self) -> asyncpg.Connection:
         if self._conn is not None and not self._conn.is_closed():

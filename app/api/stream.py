@@ -116,8 +116,7 @@ async def stream(
         logger.exception("stream subscriber %s failed", subscriber.id)
     finally:
         await hub.unsubscribe(subscriber)
-        if websocket.application_state is WebSocketState.CONNECTED:
-            await websocket.close()
+        await _close_quietly(websocket)
 
 
 async def _replay(
@@ -150,6 +149,15 @@ async def _replay(
     return cursor
 
 
+async def _close_quietly(websocket: WebSocket) -> None:
+    if (
+        websocket.client_state is WebSocketState.CONNECTED
+        and websocket.application_state is WebSocketState.CONNECTED
+    ):
+        with contextlib.suppress(RuntimeError):
+            await websocket.close()
+
+
 async def _watch_for_disconnect(websocket: WebSocket) -> None:
     """Read from the socket for the sole purpose of noticing it closed.
 
@@ -174,7 +182,10 @@ async def _pump(
     while True:
         if subscriber.overflowed:
             logger.warning("closing slow subscriber %s", subscriber.id)
-            await websocket.close(code=WS_CODE_SLOW_CONSUMER, reason="slow consumer")
+            with contextlib.suppress(RuntimeError):
+                await websocket.close(
+                    code=WS_CODE_SLOW_CONSUMER, reason="slow consumer"
+                )
             return
 
         envelope = await subscriber.next_event(timeout=heartbeat)
