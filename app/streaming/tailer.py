@@ -91,12 +91,13 @@ class OutboxTailer:
             await asyncio.wait_for(
                 self._wakeup.wait(), timeout=self._settings.tailer_poll_interval
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             woken_by_notify = False
         finally:
             self._wakeup.clear()
 
         debounce = self._settings.tailer_debounce
+
         if woken_by_notify and debounce > 0:
             await asyncio.sleep(debounce)
 
@@ -135,9 +136,7 @@ class OutboxTailer:
 
     async def _deliver_batch(self) -> int:
         conn = await self._ensure_connection()
-        rows = await conn.fetch(
-            _TAIL_SQL, self._cursor, self._settings.tailer_batch_size
-        )
+        rows = await conn.fetch(_TAIL_SQL, self._cursor, self._settings.tailer_batch_size)
         if not rows:
             return 0
 
@@ -148,8 +147,6 @@ class OutboxTailer:
         self._cursor = int(rows[-1]["stream_seq"])
         self._hub.publish(envelopes)
         self.delivered_total += len(envelopes)
-
-        logger.debug(
-            "tailed %d events up to stream_seq=%d", len(envelopes), self._cursor
-        )
+        logger.debug("tailed %d events up to stream_seq=%d", len(envelopes), self._cursor)
+        
         return len(envelopes)

@@ -46,7 +46,6 @@ class Settings(BaseSettings):
 
     @property
     def asyncpg_dsn(self) -> str:
-        """DSN for the async runtime driver (asyncpg)."""
         return (
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
@@ -54,7 +53,6 @@ class Settings(BaseSettings):
 
     @property
     def alembic_dsn(self) -> str:
-        """DSN for Alembic, which runs synchronously via psycopg2."""
         return (
             f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"

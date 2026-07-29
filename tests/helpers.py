@@ -15,7 +15,7 @@ WS_GOING_AWAY = {WS_SERVER_SHUTDOWN, 1012, 1001}
 
 
 def utcnow() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 class StreamClient:
@@ -31,7 +31,7 @@ class StreamClient:
         self.duplicates = 0
         self.close_code: int | None = None
 
-    async def __aenter__(self) -> "StreamClient":
+    async def __aenter__(self) -> StreamClient:
         await self.connect()
         return self
 

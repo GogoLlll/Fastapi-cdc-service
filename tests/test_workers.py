@@ -11,9 +11,7 @@ pytestmark = pytest.mark.slow
 
 
 async def client_for(server) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        base_url=server.http_url, timeout=30.0, trust_env=False
-    )
+    return httpx.AsyncClient(base_url=server.http_url, timeout=30.0, trust_env=False)
 
 
 async def test_a_write_on_one_worker_reaches_a_subscriber_on_the_other(workers):
@@ -43,9 +41,10 @@ async def test_both_workers_observe_the_same_total_order(workers):
     a, b = workers
 
     async with await client_for(a) as http_a, await client_for(b) as http_b:
-        async with StreamClient(a.ws_url(last_event_id=0)) as sub_a, StreamClient(
-            b.ws_url(last_event_id=0)
-        ) as sub_b:
+        async with (
+            StreamClient(a.ws_url(last_event_id=0)) as sub_a,
+            StreamClient(b.ws_url(last_event_id=0)) as sub_b,
+        ):
             await sub_a.control_frame("ready")
             await sub_b.control_frame("ready")
 
@@ -70,10 +69,7 @@ async def test_only_one_worker_assigns_cursors(workers, pool):
 
     async with await client_for(a) as http_a, await client_for(b) as http_b:
         await asyncio.gather(
-            *(
-                create_item(http_a if i % 2 else http_b, f"race-{i}")
-                for i in range(100)
-            )
+            *(create_item(http_a if i % 2 else http_b, f"race-{i}") for i in range(100))
         )
     await asyncio.sleep(1.0)
 

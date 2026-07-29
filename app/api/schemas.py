@@ -25,7 +25,7 @@ class ItemUpdate(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _at_least_one_field(self) -> "ItemUpdate":
+    def _at_least_one_field(self) -> ItemUpdate:
         if self.name is None and self.value is None:
             raise ValueError("at least one of 'name' or 'value' must be provided")
         return self
@@ -43,8 +43,6 @@ class ItemRead(BaseModel):
 
 
 class ItemWriteResponse(BaseModel):
-    """A committed item plus the id of the event it generated."""
-
     item: ItemRead
     event_id: int = Field(
         description=(

@@ -15,7 +15,6 @@ def is_shutdown(envelope: dict[str, Any]) -> bool:
 
 
 class Subscriber:
-
     __slots__ = ("id", "queue", "aggregate_id", "cursor", "_overflowed")
 
     def __init__(
@@ -59,7 +58,8 @@ class Subscriber:
     async def next_event(self, timeout: float) -> dict[str, Any] | None:
         try:
             return await asyncio.wait_for(self.queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+
+        except TimeoutError:
             return None
 
 

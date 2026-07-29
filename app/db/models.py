@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +17,7 @@ class Item:
     updated_at: dt.datetime
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> "Item":
+    def from_row(cls, row: Mapping[str, Any]) -> Item:
         return cls(
             id=row["id"],
             name=row["name"],
@@ -27,7 +28,6 @@ class Item:
         )
 
     def to_payload(self) -> dict[str, Any]:
-        """JSON-serialisable snapshot stored in the outbox payload."""
         return {
             "id": str(self.id),
             "name": self.name,
@@ -40,13 +40,6 @@ class Item:
 
 @dataclass(frozen=True, slots=True)
 class OutboxEvent:
-    """A row of the outbox table.
-
-    ``id`` is assigned at INSERT time and therefore does NOT reflect commit
-    order. ``stream_seq`` is assigned by the dispatcher after the transaction
-    has committed, and is the value clients use as their cursor.
-    """
-
     id: int
     aggregate_type: str
     aggregate_id: uuid.UUID
@@ -57,7 +50,7 @@ class OutboxEvent:
     stream_seq: int | None = None
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> "OutboxEvent":
+    def from_row(cls, row: Mapping[str, Any]) -> OutboxEvent:
         return cls(
             id=row["id"],
             aggregate_type=row["aggregate_type"],
@@ -70,7 +63,6 @@ class OutboxEvent:
         )
 
     def to_envelope(self) -> dict[str, Any]:
-        """Wire format sent to WebSocket subscribers."""
         return {
             "stream_seq": self.stream_seq,
             "event_id": self.id,
@@ -84,11 +76,5 @@ class OutboxEvent:
 
 @dataclass(frozen=True, slots=True)
 class WriteResult:
-    """A committed write plus the id of the outbox event it produced.
-
-    The API returns ``event_id`` so a client can correlate its own write with
-    the event it will later receive on the stream.
-    """
-
     item: Item
     event_id: int

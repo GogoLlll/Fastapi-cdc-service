@@ -1,14 +1,3 @@
-"""Stage 1 smoke test: CRUD and outbox atomicity, against a live database.
-
-Not a replacement for the pytest suite (stage 4) -- this is the quick check
-that the write path is sound:
-
-    PYTHONPATH=. python scripts/smoke_stage1.py
-
-Requires POSTGRES_* env vars pointing at a migrated database.
-WARNING: truncates the `items` and `outbox` tables.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +26,6 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 
 
 async def outbox_max_id(client: httpx.AsyncClient) -> int:
-    """Page through the outbox and return the highest event id seen."""
     cursor = 0
     while True:
         page = (
@@ -184,7 +172,6 @@ async def rollback_consistency(pool: asyncpg.Pool) -> None:
     class Boom(Exception):
         pass
 
-    # Reproduce exactly what the repository does, then fail before COMMIT.
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -206,7 +193,6 @@ async def rollback_consistency(pool: asyncpg.Pool) -> None:
     check("item count unchanged", after_items == before_items)
     check("no orphan event was left behind", after_events == before_events)
 
-    # The mirror image: every committed item has at least one event.
     dangling = await pool.fetchval(
         """
         SELECT count(*) FROM items i
@@ -215,7 +201,6 @@ async def rollback_consistency(pool: asyncpg.Pool) -> None:
     )
     check("every committed item has an event", dangling == 0, f"dangling={dangling}")
 
-    # A failing repository write must leave nothing behind either.
     try:
         await repo.update(uuid.uuid4(), name="ghost", value=None, expected_version=None)
     except Exception:
@@ -230,7 +215,6 @@ async def main() -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
 
-    # Start from a clean slate so counts are deterministic.
     conn = await asyncpg.connect(settings.asyncpg_dsn)
     await conn.execute("TRUNCATE items, outbox RESTART IDENTITY")
     await conn.close()

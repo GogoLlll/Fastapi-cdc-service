@@ -64,9 +64,9 @@ async def stream(
                     ),
                 }
             )
-            await websocket.close(
-                code=WS_CODE_CURSOR_TOO_OLD, reason="cursor too old"
-            )
+
+            await websocket.close(code=WS_CODE_CURSOR_TOO_OLD, reason="cursor too old")
+
             return
 
     subscriber = await hub.subscribe(aggregate_id=aggregate_id, cursor=last_event_id)
@@ -108,7 +108,7 @@ async def stream(
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         for task in done:
-            task.result()  # re-raise whatever ended the connection
+            task.result()
 
     except WebSocketDisconnect:
         pass
@@ -127,7 +127,6 @@ async def _replay(
     aggregate_id: uuid.UUID | None,
     page_size: int,
 ) -> int:
-    """Send everything the client missed. Returns the last stream_seq sent."""
     cursor = after_seq
     sent = 0
 
@@ -159,12 +158,6 @@ async def _close_quietly(websocket: WebSocket) -> None:
 
 
 async def _watch_for_disconnect(websocket: WebSocket) -> None:
-    """Read from the socket for the sole purpose of noticing it closed.
-
-    The protocol is server-to-client only, so anything the client sends is
-    ignored. What matters is the disconnect message, which is the only
-    reliable, immediate signal that the peer is gone.
-    """
     while True:
         message = await websocket.receive()
         if message["type"] == "websocket.disconnect":
@@ -178,14 +171,11 @@ async def _pump(
     skip_up_to: int,
     heartbeat: float,
 ) -> None:
-    """Forward live events until the client goes away or falls behind."""
     while True:
         if subscriber.overflowed:
             logger.warning("closing slow subscriber %s", subscriber.id)
             with contextlib.suppress(RuntimeError):
-                await websocket.close(
-                    code=WS_CODE_SLOW_CONSUMER, reason="slow consumer"
-                )
+                await websocket.close(code=WS_CODE_SLOW_CONSUMER, reason="slow consumer")
             return
 
         envelope = await subscriber.next_event(timeout=heartbeat)

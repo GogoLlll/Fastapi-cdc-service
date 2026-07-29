@@ -44,7 +44,6 @@ async def test_concurrent_updates_of_one_entity_are_serialised(api, pool):
 
 
 async def test_optimistic_locking_lets_exactly_one_writer_win(api):
-    """Two clients racing on the same version: one 200, one 409."""
     created = (await api.post("/api/v1/items", json={"name": "contested"})).json()
     item_id = created["item"]["id"]
 

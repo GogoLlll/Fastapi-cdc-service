@@ -42,7 +42,7 @@ def free_port() -> int:
 
 
 def now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 class Worker:
@@ -61,7 +61,9 @@ class Worker:
 
     def ws_url(self, **params: object) -> str:
         query = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"ws://127.0.0.1:{self.port}/api/v1/stream" + (f"?{query}" if query else "")
+        return f"ws://127.0.0.1:{self.port}/api/v1/stream" + (
+            f"?{query}" if query else ""
+        )
 
     async def start(self) -> None:
         config = uvicorn.Config(
@@ -91,7 +93,7 @@ class StreamClient:
         self.duplicates = 0
         self.close_code: int | None = None
 
-    async def __aenter__(self) -> "StreamClient":
+    async def __aenter__(self) -> StreamClient:
         self._ws = await websockets.connect(self._url, open_timeout=10)
         self._task = asyncio.create_task(self._reader())
         return self
@@ -167,14 +169,18 @@ class StreamClient:
 async def cross_worker_delivery(a: Worker, b: Worker) -> None:
     print("\n[1] A write on one worker reaches a subscriber on the other", flush=True)
 
-    async with httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http_a:
+    async with httpx.AsyncClient(
+        base_url=a.http_url, timeout=30, trust_env=False
+    ) as http_a:
         async with StreamClient(b.ws_url(last_event_id=0)) as sub_b:
             await sub_b.await_control("ready")
 
             r = await http_a.post("/api/v1/items", json={"name": "cross", "value": 1})
             item_id = r.json()["item"]["id"]
 
-            check("event crossed the worker boundary", await sub_b.wait_for(1, timeout=10))
+            check(
+                "event crossed the worker boundary", await sub_b.wait_for(1, timeout=10)
+            )
             if not sub_b.events:
                 return
             check("it is the right event", sub_b.events[0]["aggregate_id"] == item_id)
@@ -186,16 +192,22 @@ async def cross_worker_delivery(a: Worker, b: Worker) -> None:
                 async with StreamClient(a.ws_url(last_event_id=0)) as sub_a:
                     await sub_a.await_control("ready")
                     await http_b.post("/api/v1/items", json={"name": "cross-back"})
-                    check("and in the other direction", await sub_a.wait_for(1, timeout=10))
+                    check(
+                        "and in the other direction", await sub_a.wait_for(1, timeout=10)
+                    )
 
 
 async def both_workers_see_the_same_order(a: Worker, b: Worker) -> None:
     print("\n[2] Both workers deliver the same events in the same order", flush=True)
 
-    async with httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http_a, \
-               httpx.AsyncClient(base_url=b.http_url, timeout=30, trust_env=False) as http_b:
-        async with StreamClient(a.ws_url(last_event_id=0)) as sub_a, \
-                   StreamClient(b.ws_url(last_event_id=0)) as sub_b:
+    async with (
+        httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http_a,
+        httpx.AsyncClient(base_url=b.http_url, timeout=30, trust_env=False) as http_b,
+    ):
+        async with (
+            StreamClient(a.ws_url(last_event_id=0)) as sub_a,
+            StreamClient(b.ws_url(last_event_id=0)) as sub_b,
+        ):
             await sub_a.await_control("ready")
             await sub_b.await_control("ready")
 
@@ -218,7 +230,10 @@ async def both_workers_see_the_same_order(a: Worker, b: Worker) -> None:
             seqs_b = [e["stream_seq"] for e in sub_b.events[:writes]]
             check("both saw an identical sequence", seqs_a == seqs_b)
             check("stream_seq strictly increasing", seqs_a == sorted(seqs_a))
-            check("no duplicates on either worker", sub_a.duplicates == 0 and sub_b.duplicates == 0)
+            check(
+                "no duplicates on either worker",
+                sub_a.duplicates == 0 and sub_b.duplicates == 0,
+            )
 
 
 async def only_one_publisher(pool) -> None:
@@ -259,7 +274,9 @@ async def latency_across_workers(a: Worker, b: Worker) -> None:
     waves, per_wave = 15, 8
     samples = waves * per_wave
 
-    async with httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http_a:
+    async with httpx.AsyncClient(
+        base_url=a.http_url, timeout=30, trust_env=False
+    ) as http_a:
         async with StreamClient(b.ws_url(last_event_id=0)) as sub_b:
             await sub_b.await_control("ready")
             for w in range(waves):
@@ -277,8 +294,9 @@ async def latency_across_workers(a: Worker, b: Worker) -> None:
         return
 
     deltas = [
-        (received - dt.datetime.fromisoformat(event["occurred_at"])).total_seconds() * 1000
-        for event, received in zip(sub_b.events, sub_b.received)
+        (received - dt.datetime.fromisoformat(event["occurred_at"])).total_seconds()
+        * 1000
+        for event, received in zip(sub_b.events, sub_b.received, strict=False)
     ]
     ordered = sorted(deltas)
     p50 = statistics.median(ordered)
@@ -300,7 +318,9 @@ async def latency_across_workers(a: Worker, b: Worker) -> None:
 async def retention_and_stale_cursor(a: Worker, pool) -> None:
     print("\n[5] Retention trims history and stale cursors are refused", flush=True)
 
-    async with httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http:
+    async with httpx.AsyncClient(
+        base_url=a.http_url, timeout=30, trust_env=False
+    ) as http:
         async with StreamClient(a.ws_url(last_event_id=0)) as client:
             await client.await_control("ready")
             await http.post("/api/v1/items", json={"name": "will-be-trimmed"})
@@ -333,10 +353,17 @@ async def retention_and_stale_cursor(a: Worker, pool) -> None:
         try:
             frame = await stale.await_control("cursor_too_old", timeout=10)
             check("server refuses a stale cursor", True)
-            check("it reports the oldest available seq", frame["oldest_available"] >= (oldest or 1))
+            check(
+                "it reports the oldest available seq",
+                frame["oldest_available"] >= (oldest or 1),
+            )
             check("it explains what to do", "Resynchronise" in frame["detail"])
-            check("closed with code 4003", await stale.wait_closed(timeout=5)
-                  and stale.close_code == WS_CODE_CURSOR_TOO_OLD, str(stale.close_code))
+            check(
+                "closed with code 4003",
+                await stale.wait_closed(timeout=5)
+                and stale.close_code == WS_CODE_CURSOR_TOO_OLD,
+                str(stale.close_code),
+            )
         except AssertionError as exc:
             check("server refuses a stale cursor", False, str(exc))
         finally:
@@ -382,25 +409,40 @@ async def graceful_shutdown(pool) -> None:
         )
         await client.close()
 
-    pending = await pool.fetchval("SELECT count(*) FROM outbox WHERE published_at IS NULL")
+    pending = await pool.fetchval(
+        "SELECT count(*) FROM outbox WHERE published_at IS NULL"
+    )
     check("shutdown left nothing unpublished", pending == 0, f"pending={pending}")
 
 
 async def health_reports_the_roles(a: Worker, b: Worker) -> None:
     print("\n[7] Health exposes per-worker state", flush=True)
 
-    async with httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http_a, \
-               httpx.AsyncClient(base_url=b.http_url, timeout=30, trust_env=False) as http_b:
+    async with (
+        httpx.AsyncClient(base_url=a.http_url, timeout=30, trust_env=False) as http_a,
+        httpx.AsyncClient(base_url=b.http_url, timeout=30, trust_env=False) as http_b,
+    ):
         ha = (await http_a.get("/health")).json()
         hb = (await http_b.get("/health")).json()
 
     check("both workers report healthy", ha["status"] == "ok" and hb["status"] == "ok")
-    check("both run their background roles", ha["dispatcher_running"] and hb["dispatcher_running"])
-    check("the pids differ", ha["worker_pid"] is not None and hb["worker_pid"] is not None)
-    check("both agree on the global head", ha["stream_head"] == hb["stream_head"],
-          f"{ha['stream_head']} vs {hb['stream_head']}")
-    check("neither tailer is lagging", ha["tailer_lag"] == 0 and hb["tailer_lag"] == 0,
-          f"A={ha['tailer_lag']} B={hb['tailer_lag']}")
+    check(
+        "both run their background roles",
+        ha["dispatcher_running"] and hb["dispatcher_running"],
+    )
+    check(
+        "the pids differ", ha["worker_pid"] is not None and hb["worker_pid"] is not None
+    )
+    check(
+        "both agree on the global head",
+        ha["stream_head"] == hb["stream_head"],
+        f"{ha['stream_head']} vs {hb['stream_head']}",
+    )
+    check(
+        "neither tailer is lagging",
+        ha["tailer_lag"] == 0 and hb["tailer_lag"] == 0,
+        f"A={ha['tailer_lag']} B={hb['tailer_lag']}",
+    )
 
 
 async def main() -> int:

@@ -12,7 +12,6 @@ from app.db.pool import init_connection
 logger = logging.getLogger(__name__)
 
 WRITE_CHANNEL = "outbox_new"
-
 PUBLISH_LOCK_ID = 918_273_645
 
 _CLAIM_SQL = """
@@ -41,7 +40,7 @@ class OutboxPublisher:
         self._conn: asyncpg.Connection | None = None
         self._wakeup = asyncio.Event()
         self._stopping = asyncio.Event()
-
+        
         self.published_total = 0
         self.skipped_rounds = 0
         self.last_error: str | None = None
@@ -90,7 +89,8 @@ class OutboxPublisher:
             await asyncio.wait_for(
                 self._wakeup.wait(), timeout=self._settings.dispatcher_poll_interval
             )
-        except asyncio.TimeoutError:
+
+        except TimeoutError:
             woken_by_notify = False
         finally:
             self._wakeup.clear()

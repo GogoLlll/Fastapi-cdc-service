@@ -29,7 +29,7 @@ def upgrade() -> None:
         $$;
         """
     )
-    
+
     op.execute(
         """
         CREATE TRIGGER outbox_published_trigger

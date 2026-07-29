@@ -7,7 +7,6 @@ from locust import HttpUser, between, task
 
 
 class WriterUser(HttpUser):
-
     wait_time = between(0.05, 0.2)
 
     def on_start(self) -> None:

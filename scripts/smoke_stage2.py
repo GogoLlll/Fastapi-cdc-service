@@ -1,15 +1,3 @@
-"""Stage 2 smoke test: the event stream, end to end over a real WebSocket.
-
-Runs uvicorn in-process on a loopback port and talks to it as an outside
-client would -- no ASGI shortcuts, because the point is to measure real
-delivery, including the socket.
-
-    PYTHONPATH=. python scripts/smoke_stage2.py
-
-Requires POSTGRES_* env vars pointing at a migrated database.
-WARNING: truncates the `items` and `outbox` tables.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -53,19 +41,10 @@ def free_port() -> int:
 
 
 def now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
-# ----------------------------------------------------------------------
-# A tiny client that mirrors what a real consumer must do
-# ----------------------------------------------------------------------
 class StreamClient:
-    """Collects events in the background and tracks its own cursor.
-
-    This is the reference implementation of the client contract: remember the
-    highest stream_seq processed, discard anything at or below it.
-    """
-
     def __init__(self, url: str) -> None:
         self._url = url
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -77,7 +56,7 @@ class StreamClient:
         self.duplicates = 0
         self.close_code: int | None = None
 
-    async def __aenter__(self) -> "StreamClient":
+    async def __aenter__(self) -> StreamClient:
         self._ws = await websockets.connect(self._url, open_timeout=10)
         self._task = asyncio.create_task(self._reader())
         await self._await_control("ready")
@@ -100,9 +79,6 @@ class StreamClient:
                     continue
                 self.cursor = seq
                 self.events.append(message)
-                # Stamped per event, not per batch: the latency we care about
-                # is per event, and one shared timestamp would measure the
-                # span of the whole run instead.
                 self.received.append(now())
         except websockets.ConnectionClosed as exc:
             self.close_code = exc.code
@@ -125,13 +101,6 @@ class StreamClient:
         return False
 
     async def quiesce(self, idle: float = 0.4, timeout: float = 10.0) -> None:
-        """Wait until the stream has been silent for `idle` seconds.
-
-        Needed before snapshotting a cursor: `wait_for(n)` returns as soon as
-        n events have landed, but events from earlier sections of this script
-        may still be in flight, and a cursor taken mid-flight would make the
-        replay assertions off by however many were still arriving.
-        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         seen = -1
@@ -150,9 +119,6 @@ class StreamClient:
                 await self._task
 
 
-# ----------------------------------------------------------------------
-# Checks
-# ----------------------------------------------------------------------
 async def live_delivery(http: httpx.AsyncClient, ws_url: str) -> None:
     print("\n[1] Live delivery of committed writes", flush=True)
 
@@ -169,7 +135,11 @@ async def live_delivery(http: httpx.AsyncClient, ws_url: str) -> None:
         check("aggregate_id matches the write", event["aggregate_id"] == item_id)
         check("payload carries the full snapshot", event["data"]["name"] == "live")
         check("stream_seq is present and positive", event["stream_seq"] > 0)
-        check("event_id matches the write response", event["event_id"] == r.json()["event_id"])
+
+        check(
+            "event_id matches the write response",
+            event["event_id"] == r.json()["event_id"],
+        )
 
         await http.patch(f"/api/v1/items/{item_id}", json={"value": 2})
         await http.delete(f"/api/v1/items/{item_id}")
@@ -205,12 +175,12 @@ async def rollback_emits_nothing(http: httpx.AsyncClient, ws_url: str, pool) -> 
         except Boom:
             pass
 
-        # Give the dispatcher several poll intervals to prove a negative.
         await asyncio.sleep(1.0)
-        check("nothing was streamed", len(client.events) == 0, f"got {len(client.events)}")
 
-        # A committed write right after must still flow, proving the stream
-        # is alive and the silence above was about the rollback, not a stall.
+        check(
+            "nothing was streamed", len(client.events) == 0, f"got {len(client.events)}"
+        )
+
         await http.post("/api/v1/items", json={"name": "after-rollback"})
         check("stream still works afterwards", await client.wait_for(1, timeout=5))
 
@@ -256,19 +226,15 @@ async def reconnect_and_replay(http: httpx.AsyncClient, ws_url: str) -> None:
         cursor = client.cursor
         check("client has a cursor before dropping", cursor > 0, f"seq={cursor}")
 
-    # Offline window: writes happen while nobody is listening.
     missed = 25
     for i in range(missed):
         await http.post("/api/v1/items", json={"name": f"missed-{i}"})
 
-    # Reconnect from the saved cursor.
-    async with StreamClient(f"{ws_url.replace('last_event_id=0', f'last_event_id={cursor}')}") as client:
+    async with StreamClient(
+        f"{ws_url.replace('last_event_id=0', f'last_event_id={cursor}')}"
+    ) as client:
         complete = await client._await_control("replay_complete", timeout=10)
-        # The split between "replayed" and "arrived live" is a race by design:
-        # the dispatcher may publish the last of the offline writes while the
-        # replay is already running. Asserting an exact replay count would be
-        # testing the race, not the guarantee. What must hold is that the two
-        # paths together cover every missed event exactly once.
+
         await client.quiesce()
         replayed = complete["count"]
         total = len(client.events)
@@ -292,19 +258,17 @@ async def reconnect_and_replay(http: httpx.AsyncClient, ws_url: str) -> None:
         )
         check("no duplicates below the cursor", all(s > cursor for s in seqs))
 
-        # Live traffic resumes cleanly on top of the replay.
         await http.post("/api/v1/items", json={"name": "after-reconnect"})
-        check("live delivery resumes after replay", await client.wait_for(missed + 1, timeout=5))
+
+        check(
+            "live delivery resumes after replay",
+            await client.wait_for(missed + 1, timeout=5),
+        )
+
         check("no duplicates across the replay/live boundary", client.duplicates == 0)
 
 
 async def _db_side_latency(pool, after_id: int) -> tuple[float, float, float]:
-    """insert -> published_at, straight from the database.
-
-    This is the part the service is actually responsible for. The client-side
-    number below also includes socket and event-loop time, which in this
-    single-process harness is contention with the load generator itself.
-    """
     row = await pool.fetchrow(
         """
         SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY ms) AS p50,
@@ -347,17 +311,18 @@ async def latency(http: httpx.AsyncClient, ws_url: str, pool) -> None:
             )
             await asyncio.sleep(0.02)
         arrived = await client.wait_for(samples, timeout=30)
-        check("every write reached the stream", arrived, f"{len(client.events)}/{samples}")
+
+        check(
+            "every write reached the stream", arrived, f"{len(client.events)}/{samples}"
+        )
 
     if not client.events:
         return
 
-    # occurred_at is stamped inside the transaction, i.e. strictly *before*
-    # commit, and received the moment the frame is parsed. Both directions
-    # round against us: this is an upper bound, never an optimistic figure.
     deltas = [
-        (received - dt.datetime.fromisoformat(event["occurred_at"])).total_seconds() * 1000
-        for event, received in zip(client.events, client.received)
+        (received - dt.datetime.fromisoformat(event["occurred_at"])).total_seconds()
+        * 1000
+        for event, received in zip(client.events, client.received, strict=False)
     ]
     p50, p95, worst = _percentiles(deltas)
     d50, d95, dworst = await _db_side_latency(pool, high_water)
@@ -392,12 +357,20 @@ async def burst(http: httpx.AsyncClient, ws_url: str, pool) -> None:
     async with StreamClient(ws_url) as client:
         started = now()
         await asyncio.gather(
-            *(http.post("/api/v1/items", json={"name": f"burst-{i}"}) for i in range(samples))
+            *(
+                http.post("/api/v1/items", json={"name": f"burst-{i}"})
+                for i in range(samples)
+            )
         )
         arrived = await client.wait_for(samples, timeout=60)
         elapsed = (now() - started).total_seconds() * 1000
 
-    check("every write in the burst was delivered", arrived, f"{len(client.events)}/{samples}")
+    check(
+        "every write in the burst was delivered",
+        arrived,
+        f"{len(client.events)}/{samples}",
+    )
+
     check("no duplicates under burst", client.duplicates == 0)
     seqs = [e["stream_seq"] for e in client.events]
     check("stream_seq monotonic under burst", seqs == sorted(seqs))
@@ -408,10 +381,7 @@ async def burst(http: httpx.AsyncClient, ws_url: str, pool) -> None:
         f"p50={d50:.0f} ms  p95={d95:.0f} ms  max={dworst:.0f} ms",
         flush=True,
     )
-    # The end-to-end figure is not asserted here: the load generator, the
-    # server and the subscriber share one event loop in this harness, so a
-    # 300-write burst measures the harness as much as the service. The real
-    # concurrency numbers come from the stage 5 load test, run out of process.
+
     check(
         f"db-side p95 within the {LATENCY_BUDGET_MS:.0f} ms budget under burst",
         d95 <= LATENCY_BUDGET_MS,
@@ -428,11 +398,19 @@ async def fanout(http: httpx.AsyncClient, ws_url: str) -> None:
     try:
         writes = 20
         await asyncio.gather(
-            *(http.post("/api/v1/items", json={"name": f"fan-{i}"}) for i in range(writes))
+            *(
+                http.post("/api/v1/items", json={"name": f"fan-{i}"})
+                for i in range(writes)
+            )
         )
         results = await asyncio.gather(*(c.wait_for(writes, timeout=10) for c in clients))
-        check("all subscribers received all events", all(results),
-              f"{[len(c.events) for c in clients]}")
+
+        check(
+            "all subscribers received all events",
+            all(results),
+            f"{[len(c.events) for c in clients]}",
+        )
+
         seq_sets = [tuple(e["stream_seq"] for e in c.events[:writes]) for c in clients]
         check("all subscribers saw the same order", len(set(seq_sets)) == 1)
     finally:
@@ -443,7 +421,10 @@ async def fanout(http: httpx.AsyncClient, ws_url: str) -> None:
 async def consistency_invariant(pool) -> None:
     print("\n[8] Database invariants after the run", flush=True)
 
-    pending = await pool.fetchval("SELECT count(*) FROM outbox WHERE published_at IS NULL")
+    pending = await pool.fetchval(
+        "SELECT count(*) FROM outbox WHERE published_at IS NULL"
+    )
+
     check("nothing left unpublished", pending == 0, f"pending={pending}")
 
     mismatched = await pool.fetchval(
@@ -452,6 +433,7 @@ async def consistency_invariant(pool) -> None:
         WHERE (published_at IS NULL) <> (stream_seq IS NULL)
         """
     )
+
     check("published_at and stream_seq always agree", mismatched == 0)
 
     duplicates = await pool.fetchval(
@@ -475,7 +457,6 @@ async def consistency_invariant(pool) -> None:
     )
 
 
-# ----------------------------------------------------------------------
 async def main() -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)
@@ -497,7 +478,9 @@ async def main() -> int:
     ws_url = f"ws://127.0.0.1:{port}/api/v1/stream?last_event_id=0"
 
     try:
-        async with httpx.AsyncClient(base_url=base, timeout=30.0, trust_env=False) as http:
+        async with httpx.AsyncClient(
+            base_url=base, timeout=30.0, trust_env=False
+        ) as http:
             health = (await http.get("/health")).json()
             check("dispatcher is running", health.get("dispatcher_running") is True)
 

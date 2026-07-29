@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
-from typing import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import httpx
@@ -23,7 +23,6 @@ def free_port() -> int:
 
 @pytest.fixture(scope="session")
 def test_database() -> Iterator[str]:
-    """Create a throwaway database, migrate it, drop it afterwards."""
     admin_dsn = (
         f"postgresql://{os.getenv('POSTGRES_USER', 'outbox')}:"
         f"{os.getenv('POSTGRES_PASSWORD', 'outbox')}@"
@@ -88,9 +87,6 @@ async def clean_database(settings) -> AsyncIterator[None]:
     yield
 
 
-# ----------------------------------------------------------------------
-# Application
-# ----------------------------------------------------------------------
 @pytest_asyncio.fixture
 async def api(settings) -> AsyncIterator[httpx.AsyncClient]:
     from app.main import create_app
@@ -105,7 +101,6 @@ async def api(settings) -> AsyncIterator[httpx.AsyncClient]:
 
 
 class LiveServer:
-
     def __init__(self, application) -> None:
         self.app = application
         self.port = free_port()

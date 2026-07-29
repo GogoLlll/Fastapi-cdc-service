@@ -11,12 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 async def init_connection(conn: asyncpg.Connection) -> None:
-    """Per-connection setup, run once when a connection joins the pool.
-
-    Registering a jsonb codec lets the repository pass and receive plain dicts
-    instead of hand-rolling ``json.dumps`` and ``::jsonb`` casts at every call
-    site. The dispatcher's standalone LISTEN connection reuses this too.
-    """
     await conn.set_type_codec(
         "jsonb",
         encoder=json.dumps,

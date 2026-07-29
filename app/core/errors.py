@@ -4,7 +4,6 @@ import uuid
 
 
 class DomainError(Exception):
-
     status_code: int = 400
     code: str = "domain_error"
 
@@ -23,7 +22,6 @@ class ItemNotFound(DomainError):
 
 
 class VersionConflict(DomainError):
-
     status_code = 409
     code = "version_conflict"
 

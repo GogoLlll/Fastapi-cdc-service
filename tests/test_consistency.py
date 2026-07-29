@@ -9,7 +9,7 @@ from app.db.repository import ItemRepository
 
 
 class Boom(Exception):
-    """Raised deliberately to abort a transaction mid-flight"""
+    pass
 
 
 async def count_items(pool) -> int:
@@ -40,9 +40,7 @@ class TestRollback:
 
         assert await count_items(pool) == before_items
         assert await count_events(pool) == before_events
-        assert await pool.fetchval(
-            "SELECT count(*) FROM items WHERE name = $1", marker
-        ) == 0
+        assert (await pool.fetchval("SELECT count(*) FROM items WHERE name = $1", marker) == 0)
 
     async def test_a_failed_repository_write_leaves_no_event(self, pool):
         repo = ItemRepository(pool)
@@ -56,7 +54,6 @@ class TestRollback:
         assert await count_events(pool) == before
 
     async def test_rollback_does_not_disturb_a_concurrent_write(self, pool):
-        """A doomed transaction must not take a healthy one down with it."""
         repo = ItemRepository(pool)
         marker = f"doomed-{uuid.uuid4()}"
 
@@ -79,12 +76,13 @@ class TestRollback:
 
         await asyncio.gather(doomed(), healthy())
 
-        assert await pool.fetchval(
-            "SELECT count(*) FROM items WHERE name = $1", marker
-        ) == 0
-        assert await pool.fetchval(
-            "SELECT count(*) FROM items WHERE name = 'survivor'"
-        ) == 1
+        assert (
+            await pool.fetchval("SELECT count(*) FROM items WHERE name = $1", marker) == 0
+        )
+
+        assert (
+            await pool.fetchval("SELECT count(*) FROM items WHERE name = 'survivor'") == 1
+        )
 
 
 class TestInvariants:
@@ -117,7 +115,6 @@ class TestInvariants:
         ]
 
     async def test_a_delete_event_outlives_the_row(self, api, pool):
-        """No foreign key, deliberately: the event must survive the deletion."""
         created = (await api.post("/api/v1/items", json={"name": "a"})).json()
         item_id = uuid.UUID(created["item"]["id"])
 

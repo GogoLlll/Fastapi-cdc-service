@@ -88,9 +88,8 @@ class TestOrdering:
         async with StreamClient(server.ws_url(last_event_id=0)) as client:
             await client.control_frame("ready")
 
-            await asyncio.gather(
-                *(create_item(http, f"item-{i}") for i in range(40))
-            )
+            await asyncio.gather(*(create_item(http, f"item-{i}") for i in range(40)))
+
             assert await client.wait_for(40)
 
             assert client.seqs == sorted(client.seqs)

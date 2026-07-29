@@ -29,7 +29,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE outbox DROP CONSTRAINT IF EXISTS ck_outbox_published_has_seq;")
+    op.execute(
+        "ALTER TABLE outbox DROP CONSTRAINT IF EXISTS ck_outbox_published_has_seq;"
+    )
+
     op.execute("DROP INDEX IF EXISTS ix_outbox_stream_seq;")
     op.execute("ALTER TABLE outbox DROP COLUMN IF EXISTS stream_seq;")
     op.execute("DROP SEQUENCE IF EXISTS outbox_stream_seq;")

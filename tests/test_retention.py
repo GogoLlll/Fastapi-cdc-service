@@ -111,7 +111,6 @@ class TestStaleCursor:
             assert client.seqs == [oldest, oldest + 1, oldest + 2]
 
     async def test_a_fresh_client_is_never_refused(self, http, server, pool):
-        """last_event_id=0 means live-only, so retention is irrelevant to it."""
         for i in range(3):
             await create_item(http, f"x-{i}")
         await asyncio.sleep(0.6)

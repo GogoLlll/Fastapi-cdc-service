@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import asyncpg
 
@@ -81,7 +82,10 @@ class ItemRepository:
                 if current is None:
                     raise ItemNotFound(item_id)
 
-                if expected_version is not None and current["version"] != expected_version:
+                if (
+                    expected_version is not None
+                    and current["version"] != expected_version
+                ):
                     raise VersionConflict(item_id, expected_version, current["version"])
 
                 row = await conn.fetchrow(
@@ -116,7 +120,10 @@ class ItemRepository:
                 if current is None:
                     raise ItemNotFound(item_id)
 
-                if expected_version is not None and current["version"] != expected_version:
+                if (
+                    expected_version is not None
+                    and current["version"] != expected_version
+                ):
                     raise VersionConflict(item_id, expected_version, current["version"])
 
                 item = Item.from_row(current)
@@ -134,7 +141,6 @@ class ItemRepository:
         aggregate_id: uuid.UUID,
         payload: dict[str, Any],
     ) -> int:
-        """Append an event inside the caller's transaction. Never commits."""
         return await conn.fetchval(
             """
             INSERT INTO outbox (aggregate_type, aggregate_id, event_type, payload)
@@ -197,20 +203,12 @@ class OutboxRepository:
         return [OutboxEvent.from_row(r) for r in rows]
 
     async def oldest_replayable_seq(self) -> int | None:
-        """Lowest stream_seq still on disk, or None if nothing is retained.
-
-        Used to detect a client whose cursor has fallen off the end of the
-        retention window. Returning None means there is nothing to replay at
-        all, which is indistinguishable from a fresh system -- and in both
-        cases refusing the connection would be wrong.
-        """
         value = await self._pool.fetchval(
             "SELECT min(stream_seq) FROM outbox WHERE stream_seq IS NOT NULL"
         )
         return int(value) if value is not None else None
 
     async def current_stream_seq(self) -> int:
-        """Highest published cursor, or 0 if nothing has been published yet."""
         value = await self._pool.fetchval(
             "SELECT coalesce(max(stream_seq), 0) FROM outbox"
         )

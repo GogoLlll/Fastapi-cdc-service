@@ -38,9 +38,7 @@ async def health(
         tailer_lag=(head - cursor) if cursor is not None else None,
         stream_subscribers=hub.subscriber_count if hub else None,
         dispatcher_running=dispatcher.is_running if dispatcher else None,
-        retention_running=(
-            dispatcher.retention.is_running if dispatcher else None
-        ),
+        retention_running=(dispatcher.retention.is_running if dispatcher else None),
     )
 
 

@@ -16,7 +16,7 @@ import websockets
 
 
 def now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 def parse_ts(value: str) -> dt.datetime:
@@ -48,8 +48,6 @@ def summarise(values: list[float]) -> dict[str, float]:
 
 @dataclass
 class Subscriber:
-    """One WebSocket consumer, obeying the client contract."""
-
     url: str
     name: str
     arrivals: dict[int, dt.datetime] = field(default_factory=dict)
@@ -204,9 +202,7 @@ async def service_side_latency(base_url: str, limit: int = 20000) -> dict[str, f
     ) as client:
         while len(deltas) < limit:
             page = (
-                await client.get(
-                    "/outbox", params={"after_id": cursor, "limit": 1000}
-                )
+                await client.get("/outbox", params={"after_id": cursor, "limit": 1000})
             ).json()
             if not page:
                 break
@@ -231,13 +227,24 @@ async def run(args: argparse.Namespace) -> int:
             health = (await probe.get("/health")).json()
         except Exception as exc:  # noqa: BLE001
             print(f"Service not reachable at {base_url}: {exc}", file=sys.stderr)
+            print(
+                "\nCheck, in this order:\n"
+                "  docker ps                 does this shell see a Docker daemon?\n"
+                "  docker compose ps         is anything running for this project?\n"
+                "  docker compose logs app   did it start and then die?\n"
+                "\nIf nothing is running:\n"
+                "  docker compose up -d --build --wait",
+                file=sys.stderr,
+            )
             return 2
     if health.get("status") != "ok":
         print(f"Service is not healthy: {health}", file=sys.stderr)
         return 2
 
-    mode = f"open loop at {args.rate:.0f} writes/s" if args.rate else (
-        f"closed loop, {args.concurrency} in flight"
+    mode = (
+        f"open loop at {args.rate:.0f} writes/s"
+        if args.rate
+        else (f"closed loop, {args.concurrency} in flight")
     )
     print(f"target        {base_url}")
     print(f"writes        {args.writes}")
@@ -261,10 +268,12 @@ async def run(args: argparse.Namespace) -> int:
         args.connection_limit,
         rate=args.rate,
     )
+
     print(
         f"  {len(writes)}/{args.writes} accepted in {elapsed:.1f}s "
         f"({len(writes) / elapsed:,.0f} writes/s)"
     )
+
     if args.rate and lag_ms > 50:
         print(
             f"  WARNING: the generator fell up to {lag_ms:.0f} ms behind its own "
@@ -332,9 +341,8 @@ def build_report(
 ) -> dict:
     reference = subscribers[0]
 
-    write_ms = [
-        (w.responded_at - w.sent_at).total_seconds() * 1000 for w in writes
-    ]
+    write_ms = [(w.responded_at - w.sent_at).total_seconds() * 1000 for w in writes]
+
     commit_to_delivery: list[float] = []
     request_to_delivery: list[float] = []
     delivered = 0
@@ -460,10 +468,16 @@ def write_report(report: dict, out: str | None) -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument(
-        "--url", default=os.getenv("LOAD_URL", "http://localhost:8000")
+    parser = argparse.ArgumentParser(
+        description="Load generator for the transactional outbox service.",
+        epilog=(
+            "Closed loop (default) measures capacity; --rate measures latency "
+            "at a sustainable load. See loadtest/RESULTS.md."
+        ),
     )
+
+    parser.add_argument("--url", default=os.getenv("LOAD_URL", "http://localhost:8000"))
+
     parser.add_argument("--writes", type=int, default=5000)
     parser.add_argument(
         "--concurrency",
