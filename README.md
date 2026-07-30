@@ -1,90 +1,94 @@
 # Transactional Outbox Service
 
-CRUD API над PostgreSQL, которое транслирует закоммиченные изменения данных
-подключённым клиентам в реальном времени, с сильной консистентностью между
-состоянием БД и потоком событий.
+A CRUD API over PostgreSQL that streams committed data changes to connected
+clients in real time, with strong consistency between the database state and the
+event stream.
 
-Стек: FastAPI, чистый `asyncpg` (без ORM на горячем пути), паттерн
-Transactional Outbox, доставка по WebSocket.
+Stack: FastAPI, plain `asyncpg` (no ORM on the hot path), the Transactional
+Outbox pattern, delivery over WebSocket.
 
-**Содержание**
+**Contents**
 
-- [Структура](#структура)
-- [Запуск](#запуск)
-- [Три точки входа](#три-точки-входа)
-- [Задача](#задача)
-- [Гарантии консистентности](#гарантии-консистентности)
+- [Layout](#layout)
+- [Running it](#running-it)
+- [Three entry points](#three-entry-points)
+- [The problem](#the-problem)
+- [Consistency guarantees](#consistency-guarantees)
 - [API](#api)
-- [Поток событий](#поток-событий)
-- [Схема БД](#схема-бд)
+- [Event stream](#event-stream)
+- [Database schema](#database-schema)
 - [Retention](#retention)
-- [Тесты](#тесты)
-- [Ручная проверка](#ручная-проверка)
-- [Нагрузочное тестирование](#нагрузочное-тестирование)
-- [Конфигурация](#конфигурация)
-- [Известные ограничения](#известные-ограничения)
+- [Tests](#tests)
+- [Manual checks](#manual-checks)
+- [Load testing](#load-testing)
+- [Configuration](#configuration)
 
-## Структура
+## Layout
 
 ```
 app/
-  core/        настройки, доменные ошибки, логирование
-  db/          пул asyncpg, доменные записи, репозиторий (транзакции здесь)
-  api/         Pydantic-схемы, зависимости, HTTP- и WebSocket-роутеры
+  core/        settings, domain errors, logging
+  db/          asyncpg pool, domain records, repository (transactions live here)
+  api/         Pydantic schemas, dependencies, HTTP and WebSocket routers
   streaming/   publisher, tailer, hub, retention
-migrations/    Alembic, DDL написан вручную
-tests/         набор pytest: conftest, helpers, шесть модулей
-loadtest/      генератор нагрузки, locustfile
-scripts/       entrypoint, check.sh, listen.py, smoke-тесты
+migrations/    Alembic, DDL written by hand
+tests/         pytest suite: conftest, helpers, six modules
+loadtest/      load generator, locustfile
+scripts/       entrypoint, check.sh, listen.py, smoke tests
+docs/          architecture diagrams, manual check scenarios
 ```
 
-Разделение внутри `streaming/` намеренное: publisher решает порядок,
-tailer доставляет, hub держит подписчиков и backpressure, retention
-чистит историю. Ни один из них не знает про HTTP.
+The split inside `streaming/` is deliberate: the publisher decides the order, the
+tailer delivers, the hub holds subscribers and backpressure, retention trims
+history. None of them knows about HTTP.
 
-## Запуск
+Diagrams - overview, write path, reconnect, behaviour on failure - are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Нужен только Docker. `.env` не требуется - у каждой переменной в
-`docker-compose.yml` есть значение по умолчанию.
+## Running it
+
+Docker is all you need. No `.env` required - every variable in
+`docker-compose.yml` has a default.
 
 ```bash
 docker compose up -d --build --wait
 ```
 
-`--wait` не вернёт управление, пока healthcheck не станет зелёным, и завершится
-с ненулевым кодом, если сервис не поднялся. Без него `up -d` печатает `Started`
-сразу, а это означает лишь «процесс запущен», но не «готов принимать запросы».
+`--wait` does not return until the healthcheck goes green, and exits non-zero if
+the service failed to come up. Without it `up -d` prints `Started` immediately,
+which only means "the process launched", not "ready to serve requests".
 
-Миграции применяются автоматически: entrypoint контейнера ждёт базу, выполняет
-`alembic upgrade head` и только потом запускает uvicorn.
+Migrations are applied automatically: the container entrypoint waits for the
+database, runs `alembic upgrade head`, and only then starts uvicorn.
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-### Несколько воркеров
+### Several workers
 
 ```bash
 APP_WORKERS=4 docker compose up -d --build --wait
 ```
 
-Воркеры не разделяют память. У каждого свой пул соединений, свой хаб
-подписчиков, свои tailer и retention. Publisher тоже свой, но активен всегда
-один - его выбирает advisory-лок в базе.
+Workers do not share memory. Each has its own connection pool, its own
+subscriber hub, its own tailer and retention. The publisher is per-worker too,
+but only one is ever active - an advisory lock in the database picks it.
 
-Ограничитель - соединения к Postgres:
+The limiting factor is Postgres connections:
 
 ```
-воркеров × (DB_POOL_MAX_SIZE + 3) ≤ max_connections
+workers × (DB_POOL_MAX_SIZE + 3) ≤ max_connections
 ```
 
-Тройка - publisher, tailer и retention, у каждого своё соединение вне пула.
-При дефолтах `4 × (40 + 3) = 172`, в compose выставлено `max_connections=300`.
+The three are publisher, tailer and retention, each on its own connection
+outside the pool. With the defaults, `4 × (40 + 3) = 172`; compose sets
+`max_connections=300`.
 
-### Локально, без Docker
+### Locally, without Docker
 
-Нужен Python 3.11+ и запущенный PostgreSQL 13 или новее (`gen_random_uuid()`
-входит в ядро начиная с 13-й версии).
+Requires Python 3.11+ and a running PostgreSQL 13 or newer
+(`gen_random_uuid()` is built in from version 13 onwards).
 
 ```bash
 python -m venv .venv
@@ -101,7 +105,7 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-Или поднять из compose только базу, а приложение запускать локально:
+Or bring up only the database from compose and run the application locally:
 
 ```bash
 docker compose up postgres -d
@@ -109,135 +113,137 @@ POSTGRES_HOST=localhost alembic upgrade head
 POSTGRES_HOST=localhost uvicorn app.main:app --reload
 ```
 
-### Если сервис не отвечает
+### If the service does not respond
 
-Первым делом:
+Start here:
 
 ```bash
 docker compose logs app
 docker compose ps
 ```
 
-`Exited (1)` в колонке STATUS означает, что приложение упало на старте.
-`Up (health: starting)` - что оно ещё поднимается.
+`Exited (1)` in the STATUS column means the application died on startup.
+`Up (health: starting)` means it is still coming up.
 
-**Несовместимое состояние базы.** Том `pgdata` переживает `docker compose down`.
-Если база успела уйти на миграцию новее, чем знает образ, `alembic upgrade head`
-сообщит `Can't locate revision identified by '000X'`. Начисто:
+**Incompatible database state.** The `pgdata` volume survives
+`docker compose down`. If the database has moved to a migration newer than the
+image knows about, `alembic upgrade head` will report
+`Can't locate revision identified by '000X'`. From scratch:
 
 ```bash
 docker compose down -v
 docker compose up -d --build --wait
 ```
 
-**`connection refused` при `alembic upgrade head`.** База не поднялась или
-указан не тот хост. Внутри docker-compose хост - `postgres`, снаружи -
-`localhost`. Проверить: `docker compose ps` и `pg_isready -h localhost -p 5432`.
+**`connection refused` on `alembic upgrade head`.** The database is not up, or
+the wrong host is configured. Inside docker-compose the host is `postgres`, from
+outside it is `localhost`. Check with `docker compose ps` and
+`pg_isready -h localhost -p 5432`.
 
-**`function gen_random_uuid() does not exist`.** Postgres старее 13-й версии.
-Либо обновиться, либо выполнить `CREATE EXTENSION IF NOT EXISTS pgcrypto;`.
+**`function gen_random_uuid() does not exist`.** Postgres older than 13. Either
+upgrade, or run `CREATE EXTENSION IF NOT EXISTS pgcrypto;`.
 
-**`Permission denied` при `./scripts/check.sh`.** Скрипт приехал из git без бита
-исполнения. Либо `bash scripts/check.sh`, либо один раз
-`chmod +x scripts/check.sh`.
+**`Permission denied` on `./scripts/check.sh`.** The script arrived from git
+without the execute bit. Either `bash scripts/check.sh`, or
+`chmod +x scripts/check.sh` once.
 
-## Три точки входа
+## Three entry points
 
 ### `http://localhost:8000/docs` - Swagger UI
 
-Интерактивная документация, которую FastAPI генерирует из кода: эндпоинты,
-схемы запросов и ответов, коды ошибок. 
+Interactive documentation FastAPI generates from the code: endpoints, request and
+response schemas, error codes.
 
-Как сделать запись:
+How to make a write:
 
-1. Найди блок **`POST /api/v1/items`**
-2. Нажать **`Try it out`**
-3. В **Request body** заменить `"string"` на нужное имя
+1. Find the **`POST /api/v1/items`** block
+2. Click **`Try it out`**
+3. In **Request body** replace `"string"` with the name you want
 4. **`Execute`**
-5. В **Responses** можно посмотреть код `201`, тело и заголовок `x-event-id`
+5. Under **Responses** you can see code `201`, the body and the `x-event-id` header
 
-Для `PATCH` и `DELETE` появятся два поля: **item_id** сверху - туда UUID из
-ответа, и тело запроса. Чтобы увидеть конфликт версий, нужно отправить `PATCH` дважды
-с одним и тем же `"version": 1` - второй раз получите `409`.
+For `PATCH` and `DELETE` two fields appear: **item_id** on top - the UUID from
+the response - and the request body. To see a version conflict, send `PATCH`
+twice with the same `"version": 1` - the second time you get `409`.
 
-Под каждым эндпоинтом Swagger генерирует готовую команду `curl` - её можно
-скопировать в терминал.
+Under each endpoint Swagger generates a ready `curl` command that can be copied
+into a terminal.
 
-WebSocket в списке не появится: OpenAPI описывает только HTTP.
+WebSocket will not appear in the list: OpenAPI describes HTTP only.
 
-### `http://localhost:8000/health` - состояние сервиса
+### `http://localhost:8000/health` - service state
 
-Проверка живости для оркестратора и главный диагностический эндпоинт:
+A liveness check for the orchestrator and the main diagnostic endpoint:
 
 ```jsonc
 {
-  "status": "ok",              // сводный вердикт: ok или degraded
-  "database": "ok",            // ответил ли Postgres на SELECT 1
-  "worker_pid": 42,            // какой воркер обслужил этот запрос
-  "outbox_pending": 0,         // событий записано, но ещё не опубликовано
-  "stream_head": 10432,        // максимальный назначенный stream_seq (глобально)
-  "tailer_cursor": 10432,      // до какого места дочитал tailer этого воркера
-  "tailer_lag": 0,             // stream_head - tailer_cursor, отставание раздачи
-  "stream_subscribers": 3,     // WebSocket-подписчиков на этом воркере
-  "dispatcher_running": true,  // живы ли publisher и tailer
-  "retention_running": true    // жив ли фоновый чистильщик истории
+  "status": "ok",              // overall verdict: ok or degraded
+  "database": "ok",            // did Postgres answer SELECT 1
+  "worker_pid": 42,            // which worker served this request
+  "outbox_pending": 0,         // events written but not published yet
+  "stream_head": 10432,        // highest assigned stream_seq (global)
+  "tailer_cursor": 10432,      // how far this worker's tailer has read
+  "tailer_lag": 0,             // stream_head - tailer_cursor, fan-out lag
+  "stream_subscribers": 3,     // WebSocket subscribers on this worker
+  "dispatcher_running": true,  // are the publisher and tailer alive
+  "retention_running": true    // is the background history trimmer alive
 }
 ```
 
-### `ws://localhost:8000/api/v1/stream` - поток событий
+### `ws://localhost:8000/api/v1/stream` - event stream
 
 ```bash
 python scripts/listen.py
 ```
 
-Или из консоли браузера (`F12` -> Console на любой странице):
+Or from the browser console (`F12` -> Console on any page):
 
 ```js
 const ws = new WebSocket("ws://localhost:8000/api/v1/stream");
 ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
 
-Подробности - в разделе [Поток событий](#поток-событий).
+Details are in the [Event stream](#event-stream) section.
 
-## Задача
+## The problem
 
-Наивная реализация пишет в БД, а потом публикует в сокет. Это ломается в двух
-местах:
+A naive implementation writes to the database and then publishes to a socket.
+That breaks in two places:
 
-| Наивный подход | Что происходит |
+| Naive approach | What happens |
 | --- | --- |
-| Публикация до коммита | Транзакция откатилась -> клиенты увидели событие о данных, которых нет |
-| Публикация после коммита | Процесс умер между коммитом и отправкой -> закоммиченное изменение никто не получил |
+| Publish before the commit | The transaction rolled back -> clients saw an event for data that does not exist |
+| Publish after the commit | The process died between commit and send -> nobody received the committed change |
 
-Outbox убирает разрыв: событие становится частью той же транзакции, что и
-данные. Дальше отдельный процесс публикует только то, что уже закоммичено.
+The outbox removes the gap: the event becomes part of the same transaction as
+the data. A separate process then publishes only what has already committed.
 
 ```mermaid
 flowchart TB
-    client([Клиент<br/>POST /api/v1/items])
+    client([Client<br/>POST /api/v1/items])
 
-    subgraph txn["Одна транзакция"]
+    subgraph txn["One transaction"]
         direction TB
         i1[INSERT INTO items]
         i2[INSERT INTO outbox]
         i1 --> i2
     end
 
-    commit{{"COMMIT<br/>только теперь уходит NOTIFY"}}
+    commit{{"COMMIT<br/>only now does NOTIFY go out"}}
 
-    pub["<b>PUBLISHER</b><br/>один на кластер<br/>pg_try_advisory_xact_lock<br/>назначает stream_seq"]
+    pub["<b>PUBLISHER</b><br/>one per cluster<br/>pg_try_advisory_xact_lock<br/>assigns stream_seq"]
 
-    t1["<b>TAILER</b><br/>воркер 1"]
-    t2["<b>TAILER</b><br/>воркер 2"]
-    t3["<b>TAILER</b><br/>воркер N"]
+    t1["<b>TAILER</b><br/>worker 1"]
+    t2["<b>TAILER</b><br/>worker 2"]
+    t3["<b>TAILER</b><br/>worker N"]
 
     h1[("hub")]
     h2[("hub")]
     h3[("hub")]
 
-    s1([подписчики])
-    s2([подписчики])
-    s3([подписчики])
+    s1([subscribers])
+    s2([subscribers])
+    s3([subscribers])
 
     client --> txn --> commit
     commit -->|201 Created| client
@@ -256,56 +262,56 @@ flowchart TB
     style pub fill:#e8f5e9,stroke:#2e7d32
 ```
 
-Атомарность обеспечивает PostgreSQL. `NOTIFY` тоже
-транзакционен: Postgres доставляет уведомление слушателям, только если
-транзакция закоммитилась. Откат не шлёт ничего.
+Atomicity is provided by PostgreSQL. `NOTIFY` is transactional too: Postgres
+delivers the notification to listeners only if the transaction committed. A
+rollback sends nothing.
 
-## Гарантии консистентности
+## Consistency guarantees
 
-| Гарантия | Чем обеспечена |
+| Guarantee | How it is achieved |
 | --- | --- |
-| Нет события без закоммиченных данных | Строка и событие в одной транзакции; откат отменяет оба. Publisher читает в свежем снапшоте и незакоммиченного не видит |
-| Нет закоммиченного изменения без события | Та же транзакция - событие невозможно потерять, если данные durable |
-| Порядок внутри сущности | Запись берёт `SELECT … FOR UPDATE` по строке **до** вставки в outbox и держит блокировку до коммита |
-| Глобальный порядок доставки | `stream_seq` назначает единственный publisher под advisory-локом, после коммита |
-| Реплей после реконнекта | Курсор по `stream_seq` не может пропустить событие, закоммиченное «поздно» |
-| Доставка | At-least-once. Событие может прийти дважды, но не может не прийти ни разу |
-| Окно реконнекта | Ограничено retention. Слишком старый курсор получает явный отказ, а не урезанную историю |
+| No event without committed data | The row and the event are in one transaction; a rollback discards both. The publisher reads in a fresh snapshot and does not see uncommitted rows |
+| No committed change without an event | The same transaction - the event cannot be lost once the data is durable |
+| Ordering within an entity | A write takes `SELECT … FOR UPDATE` on the row **before** inserting into the outbox and holds the lock until commit |
+| Global delivery order | `stream_seq` is assigned by the single publisher under an advisory lock, after the commit |
+| Replay after reconnect | A cursor over `stream_seq` cannot skip an event that committed "late" |
+| Delivery | At-least-once. An event may arrive twice, but it cannot fail to arrive at all |
+| Reconnect window | Bounded by retention. A cursor that is too old gets an explicit refusal rather than a truncated history |
 
 ## API
 
-| Метод | Путь | Примечание |
+| Method | Path | Notes |
 | --- | --- | --- |
-| `POST` | `/api/v1/items` | Возвращает объект и `event_id`; он же в заголовке `X-Event-Id` |
+| `POST` | `/api/v1/items` | Returns the object and `event_id`; also in the `X-Event-Id` header |
 | `GET` | `/api/v1/items` | `limit` (1–500), `offset` |
 | `GET` | `/api/v1/items/{id}` | |
-| `PATCH` | `/api/v1/items/{id}` | Необязательное поле `version` → `409` при расхождении |
-| `DELETE` | `/api/v1/items/{id}` | Необязательный `?version=` |
+| `PATCH` | `/api/v1/items/{id}` | Optional `version` field → `409` on mismatch |
+| `DELETE` | `/api/v1/items/{id}` | Optional `?version=` |
 | `WS` | `/api/v1/stream` | `last_event_id`, `aggregate_id`, `replay` |
-| `GET` | `/health` | Глубина outbox, отставание tailer'а, подписчики, pid воркера |
-| `GET` | `/outbox` | Диагностика: делает outbox наблюдаемым |
+| `GET` | `/health` | Outbox depth, tailer lag, subscribers, worker pid |
+| `GET` | `/outbox` | Diagnostics: makes the outbox observable |
 
-Ошибки в едином формате:
+Errors use a uniform format:
 
 ```json
 { "code": "version_conflict", "message": "Item ... has version 3, but version 1 was expected" }
 ```
 
-## Поток событий
+## Event stream
 
-### Параметры подключения
+### Connection parameters
 
 ```
 ws://localhost:8000/api/v1/stream
 ```
 
-| Параметр | По умолчанию | Что делает |
+| Parameter | Default | What it does |
 | --- | --- | --- |
-| `last_event_id` | `0` | Курсор возобновления: наибольший `stream_seq`, который клиент уже обработал. `0` - только живые события, без реплея |
-| `aggregate_id` | нет | Серверный фильтр по одной сущности. Неинтересные события не тратят трафик |
-| `replay` | `true` | `false` - пропустить накопленное и начать сразу с живых событий |
+| `last_event_id` | `0` | Resume cursor: the highest `stream_seq` the client has already processed. `0` - live events only, no replay |
+| `aggregate_id` | none | Server-side filter to a single entity. Uninteresting events cost no bandwidth |
+| `replay` | `true` | `false` - skip the backlog and start from live events |
 
-### Формат события
+### Event format
 
 ```json
 {
@@ -326,25 +332,25 @@ ws://localhost:8000/api/v1/stream
 }
 ```
 
-Служебные кадры отличаются наличием поля `type`:
+Control frames are distinguished by the presence of a `type` field:
 
-| Кадр | Когда | Смысл |
+| Frame | When | Meaning |
 | --- | --- | --- |
-| `{"type": "ready", "resume_from": N}` | сразу после подключения | Подписка оформлена, сервер понял курсор |
-| `{"type": "replay_complete", "up_to": N, "count": M}` | после догона | Пропущенное отправлено, дальше живой поток |
-| `{"type": "ping"}` | каждые 30 с тишины | Держит соединение сквозь прокси с idle-таймаутом |
-| `{"type": "cursor_too_old", ...}` | курсор выпал за retention | Нужна полная ресинхронизация |
+| `{"type": "ready", "resume_from": N}` | right after connecting | The subscription is registered, the server understood the cursor |
+| `{"type": "replay_complete", "up_to": N, "count": M}` | after catching up | The backlog has been sent, live stream follows |
+| `{"type": "ping"}` | every 30 s of silence | Keeps the connection alive through idle-timeout proxies |
+| `{"type": "cursor_too_old", ...}` | cursor fell outside retention | A full resynchronisation is required |
 
-### Контракт клиента
+### Client contract
 
-Три правила:
+Three rules:
 
-1. Запоминать наибольший обработанный `stream_seq`.
-2. При переподключении отправлять его как `last_event_id`.
-3. Отбрасывать всё, у чего `stream_seq` не больше запомненного.
+1. Remember the highest `stream_seq` processed.
+2. Send it back as `last_event_id` when reconnecting.
+3. Discard anything whose `stream_seq` is not greater than the remembered one.
 
-Третий пункт обязателен: доставка at-least-once. Событие может прийти дважды,
-но не может не прийти ни разу.
+The third rule is mandatory: delivery is at-least-once. An event may arrive
+twice, but it cannot fail to arrive at all.
 
 ```python
 import asyncio, json, websockets
@@ -369,49 +375,50 @@ async def consume() -> None:
 asyncio.run(consume())
 ```
 
-Курсор обновляется после успешной обработки. Если `handle` упадёт,
-при переподключении событие придёт заново.
+The cursor is updated after successful processing. If `handle` raises, the event
+arrives again on reconnect.
 
-Референсная реализация с подсчётом дубликатов и пропусков - `scripts/listen.py`.
+A reference implementation that counts duplicates and gaps is
+`scripts/listen.py`.
 
-### Медленный клиент
+### Slow client
 
-У каждого подписчика ограниченная очередь (`STREAM_QUEUE_SIZE`, по умолчанию
-1000 событий). Если клиент не успевает вычитывать и очередь переполняется,
-сервер закрывает соединение с кодом **4001**.
+Every subscriber has a bounded queue (`STREAM_QUEUE_SIZE`, 1000 events by
+default). If the client cannot keep up and the queue overflows, the server
+closes the connection with code **4001**.
 
-### Коды закрытия
+### Close codes
 
-| Код | Причина | Что делать клиенту |
+| Code | Reason | What the client should do |
 | --- | --- | --- |
-| `1000` | Нормальное закрытие | Ничего |
-| `1012` | Сервер перезапускается (шлёт uvicorn) | Переподключиться с `last_event_id` |
-| `4001` | Клиент не успевал вычитывать | Переподключиться с `last_event_id` |
-| `4002` | Сервер выключается | Переподключиться с `last_event_id` |
-| `4003` | Курсор старше окна retention | Полный resync через `GET /api/v1/items` |
+| `1000` | Normal closure | Nothing |
+| `1012` | Server restarting (sent by uvicorn) | Reconnect with `last_event_id` |
+| `4001` | Client could not keep up | Reconnect with `last_event_id` |
+| `4002` | Server shutting down | Reconnect with `last_event_id` |
+| `4003` | Cursor older than the retention window | Full resync via `GET /api/v1/items` |
 
-`1012` и `4002` означают одно и то же. Разница техническая: uvicorn закрывает
-активные соединения раньше, чем отрабатывает shutdown-хук приложения. `1012`
-(Service Restart) означает «сервер перезапускается, возвращайтесь».
+`1012` and `4002` mean the same thing. The difference is technical: uvicorn
+closes active connections before the application's shutdown hook runs. `1012`
+(Service Restart) means "the server is restarting, come back".
 
-### Слушатель
+### The listener
 
 ```bash
-python scripts/listen.py                      # живой поток
-python scripts/listen.py --reconnect          # переживает restart, догоняет
-python scripts/listen.py --last-event-id 42   # продолжить с конкретного места
-python scripts/listen.py --aggregate-id <id>  # только одна сущность
+python scripts/listen.py                      # live stream
+python scripts/listen.py --reconnect          # survives a restart, catches up
+python scripts/listen.py --last-event-id 42   # resume from a specific point
+python scripts/listen.py --aggregate-id <id>  # a single entity only
 ```
 
-Ведёт себя как корректный клиент: помнит курсор, отбрасывает дубликаты и
-подсвечивает их, кричит `GAP`, если номер пропущен.
+It behaves like a correct client: remembers the cursor, discards duplicates and
+highlights them, shouts `GAP` if a number was skipped.
 
-## Схема БД
+## Database schema
 
-Полностью в `migrations/versions/`, применяется через Alembic. Здесь - итоговое
-состояние после трёх ревизий.
+Entirely in `migrations/versions/`, applied through Alembic. Below is the final
+state after three revisions.
 
-### Доменная таблица
+### Domain table
 
 ```sql
 CREATE TABLE items (
@@ -426,9 +433,8 @@ CREATE TABLE items (
 CREATE INDEX ix_items_created_at ON items (created_at DESC, id);
 ```
 
-`version` растёт при каждом изменении и используется для оптимистичной
-блокировки: клиент присылает версию, которую видел, и получает `409`, если
-строку успели изменить.
+`version` grows on every change and is used for optimistic locking: the client
+sends the version it saw and gets `409` if the row was modified in the meantime.
 
 ### Outbox
 
@@ -448,12 +454,12 @@ CREATE TABLE outbox (
 CREATE SEQUENCE outbox_stream_seq AS BIGINT START 1;
 ```
 
-`id` - порядок вставки, `stream_seq` - порядок доставки.
+`id` is the insert order, `stream_seq` is the delivery order.
 
-Внешнего ключа из `aggregate_id` в `items.id` нет намеренно: событие
-`item.deleted` обязано пережить строку, о которой рассказывает.
+There is deliberately no foreign key from `aggregate_id` to `items.id`: an
+`item.deleted` event has to outlive the row it describes.
 
-### Индексы и констрейнты
+### Indexes and constraints
 
 ```sql
 CREATE INDEX ix_outbox_unpublished
@@ -479,19 +485,19 @@ ALTER TABLE outbox ADD CONSTRAINT ck_outbox_published_has_seq
     CHECK ((published_at IS NULL) = (stream_seq IS NULL));
 ```
 
-Почти все индексы партиальные:
+Almost every index is partial:
 
-- `ix_outbox_unpublished` - горячий путь publisher'а. Остаётся крошечным,
-  потому что опубликованные строки выпадают из индекса
-- `ix_outbox_tail` - covering-индекс для tailer'а, он сканирует
-  `WHERE stream_seq > cursor` несколько раз в секунду в каждом воркере
-- `ix_outbox_stream_seq` - существует ради уникальности, а не ради чтения
-  У чтения свой индекс, чтобы снятие констрейнта не сломало производительность
-  молча
-- `ck_outbox_published_has_seq` - два поля ставятся одним `UPDATE`, и пусть
-  база это проверяет, чем мы будем надеяться
+- `ix_outbox_unpublished` - the publisher's hot path. Stays tiny because
+  published rows drop out of the index
+- `ix_outbox_tail` - a covering index for the tailer, which scans
+  `WHERE stream_seq > cursor` several times a second in every worker
+- `ix_outbox_stream_seq` - exists for uniqueness, not for reads.
+  Reads have their own index so that dropping the constraint does not silently
+  break performance
+- `ck_outbox_published_has_seq` - the two fields are set by a single `UPDATE`,
+  and it is better for the database to check that than for us to hope
 
-### Сигнал о коммите
+### The commit signal
 
 ```sql
 CREATE FUNCTION outbox_notify() RETURNS trigger
@@ -508,22 +514,22 @@ CREATE TRIGGER outbox_notify_trigger
     EXECUTE FUNCTION outbox_notify();
 ```
 
-Триггер уровня `STATEMENT` и без payload. `NOTIFY` транзакционен: Postgres
-доставит уведомление только при коммите, откатившаяся транзакция не пошлёт
-ничего. Второй такой же триггер на `UPDATE OF stream_seq` шлёт
-`outbox_published` и будит tailer'ы во всех воркерах.
+A `STATEMENT`-level trigger with no payload. `NOTIFY` is transactional: Postgres
+delivers the notification only on commit, a rolled-back transaction sends
+nothing. A second identical trigger on `UPDATE OF stream_seq` sends
+`outbox_published` and wakes the tailers in every worker.
 
 ## Retention
 
-Опубликованные события старше `OUTBOX_RETENTION_HOURS` (по умолчанию 24)
-удаляются фоном, батчами по 5000 с паузами. Неопубликованные не трогаются
-никогда - это рабочая очередь, а не история. Батчи маленькие намеренно: один
-безлимитный `DELETE` держал бы блокировки на большом куске таблицы и тормозил
-publisher.
+Published events older than `OUTBOX_RETENTION_HOURS` (24 by default) are removed
+in the background, in batches of 5000 with pauses. Unpublished ones are never
+touched - they are a work queue, not history. The batches are small on purpose:
+one unbounded `DELETE` would hold locks over a large slice of the table and
+throttle the publisher.
 
-Окно retention - оно ровно настолько,
-насколько назад отключившийся клиент может вернуться и догнать. Клиенту, чей
-курсор выпал за окно, сервер говорит прямо и закрывает соединение кодом 4003:
+The retention window is exactly how far back a disconnected client may come back
+and catch up. For a client whose cursor fell outside the window, the server says
+so directly and closes the connection with code 4003:
 
 ```json
 {
@@ -534,115 +540,120 @@ publisher.
 }
 ```
 
-## Тесты
+## Tests
 
-### Запуск
+### Running them
 
-Одной командой всё сразу:
+Everything at once with a single command:
 
 ```bash
 bash scripts/check.sh
 ```
 
-Скрипт останавливает контейнер `app`, поднимает Postgres, накатывает миграции и
-прогоняет pytest плюс все три smoke-набора.
-Только pytest:
+The script stops the `app` container, brings up Postgres, applies the migrations
+and runs pytest plus all three smoke suites.
+pytest only:
 
 ```bash
 export POSTGRES_HOST=localhost
 python -m pytest
-python -m pytest -m "not slow"     # без конкурентности и воркеров
-python -m pytest -k reconnect -v   # по имени
+python -m pytest -m "not slow"     # without concurrency and workers
+python -m pytest -k reconnect -v   # by name
 ```
 
-### Откуда берётся база
+### Where the database comes from
 
-Тесты создают собственную базу `<POSTGRES_DB>_test`, накатывают на неё миграции
-и удаляют в конце. Рабочая база не трогается. Нужен только доступ к серверу
-Postgres - например, `docker compose up -d postgres`.
+The tests create their own database `<POSTGRES_DB>_test`, apply the migrations to
+it and drop it at the end. The working database is never touched. All that is
+needed is access to a Postgres server - for example,
+`docker compose up -d postgres`.
 
-Перед каждым тестом таблицы очищаются, а последовательность `outbox_stream_seq`
-сбрасывается. Сброс важен: часть тестов проверяет абсолютные значения курсора, и
-остатки от предыдущего теста делали бы их зелёными или красными по причинам, к
-проверяемому свойству не относящимся.
+Before every test the tables are truncated and the `outbox_stream_seq` sequence
+is reset. The reset matters: some tests assert absolute cursor values, and
+leftovers from a previous test would make them pass or fail for reasons unrelated
+to the property under test.
 
-### Что покрыто
+### What is covered
 
-| Файл | Тестов | О чём |
+| File | Tests | About |
 | --- | --- | --- |
-| `test_crud.py` | 15 | Все операции, валидация, оптимистичная блокировка, пагинация, health |
-| `test_consistency.py` | 8 | Откат транзакции, инварианты items/outbox, событие удаления переживает строку |
-| `test_concurrency.py` | 5 | Параллельные записи, порядок внутри сущности, гонка на версии |
-| `test_stream.py` | 17 | Живая доставка, порядок, реплей, дедупликация, backpressure, fan-out |
-| `test_workers.py` | 6 | Доставка через границу воркеров, единственный publisher, per-worker health |
-| `test_retention.py` | 6 | Чистка истории, окно реконнекта, отказ по устаревшему курсору |
+| `test_crud.py` | 15 | All operations, validation, optimistic locking, pagination, health |
+| `test_consistency.py` | 8 | Transaction rollback, items/outbox invariants, the delete event outlives the row |
+| `test_concurrency.py` | 5 | Concurrent writes, per-entity ordering, the race on version |
+| `test_stream.py` | 17 | Live delivery, ordering, replay, deduplication, backpressure, fan-out |
+| `test_workers.py` | 6 | Delivery across the worker boundary, a single publisher, per-worker health |
+| `test_retention.py` | 6 | History trimming, the reconnect window, refusal on a stale cursor |
 
-Четыре пункта, названные в ТЗ, покрыты так:
+The four points named in the assignment are covered as follows:
 
 **Concurrent writes** - `test_concurrent_creates_produce_one_event_each`:
-200 одновременных созданий, число событий обязано совпасть с числом строк.
-Плюс `test_optimistic_locking_lets_exactly_one_writer_win`: пять клиентов
-гонятся за одну версию, ровно один получает 200, остальные 409.
+200 simultaneous creates, the number of events must match the number of rows.
+Plus `test_optimistic_locking_lets_exactly_one_writer_win`: five clients race
+for the same version, exactly one gets 200, the rest get 409.
 
-**Transaction rollback consistency** - `TestRollback`: транзакция падает после
-обеих вставок, до коммита; ни строки, ни события не остаётся. Отдельно
-`test_rollback_does_not_disturb_a_concurrent_write` - обречённая транзакция не
-должна утащить за собой здоровую.
+**Transaction rollback consistency** - `TestRollback`: the transaction fails
+after both inserts, before the commit; neither the row nor the event remains.
+Separately, `test_rollback_does_not_disturb_a_concurrent_write` - a doomed
+transaction must not drag a healthy one down with it.
 
 **Per-entity event ordering** - `test_concurrent_updates_of_one_entity_are_serialised`:
-50 параллельных апдейтов одной строки дают версии 1..51 без пропусков и
-повторов. И `test_concurrent_writes_to_many_entities_keep_per_entity_order`:
-то же при одновременной работе с десятью сущностями, чтобы порядок не оказался
-верным просто потому, что больше ничего не происходило.
+50 concurrent updates of one row produce versions 1..51 with no gaps and no
+repeats. And `test_concurrent_writes_to_many_entities_keep_per_entity_order`:
+the same while ten entities are worked on at once, so that the order is not
+correct merely because nothing else was happening.
 
-**Client reconnection / deduplication** - `TestReconnect`: разрыв, писатели
-работают в offline-окно, переподключение с курсором, реплей добирает ровно
-пропущенное. `test_duplicates_below_the_cursor_are_discarded_by_the_client`
-проверяет само правило дедупликации, а не предполагает его.
+**Client reconnection / deduplication** - `TestReconnect`: a drop, writers work
+during the offline window, reconnect with the cursor, the replay picks up exactly
+what was missed. `test_duplicates_below_the_cursor_are_discarded_by_the_client`
+checks the deduplication rule itself rather than assuming it.
 
-### Smoke-скрипты
+### Smoke scripts
 
 ```bash
-PYTHONPATH=. python scripts/smoke_stage1.py   # 33 проверки: запись и outbox
-PYTHONPATH=. python scripts/smoke_stage2.py   # 35 проверок: поток событий
-PYTHONPATH=. python scripts/smoke_stage3.py   # 29 проверок: два воркера, retention
+PYTHONPATH=. python scripts/smoke_stage1.py   # 33 checks: writes and outbox
+PYTHONPATH=. python scripts/smoke_stage2.py   # 35 checks: event stream
+PYTHONPATH=. python scripts/smoke_stage3.py   # 29 checks: two workers, retention
 ```
 
-Третий поднимает два независимых экземпляра приложения на разных портах -
-ровно то, что делает `uvicorn --workers 2`. Иначе главное свойство не доказать:
-запись, обработанная воркером A, обязана дойти до подписчика воркера B.
+The third one starts two independent application instances on different ports -
+exactly what `uvicorn --workers 2` does. Otherwise the main property cannot be
+proven: a write handled by worker A must reach a subscriber on worker B.
 
-**Все три скрипта очищают таблицы `items` и `outbox`** - на боевой базе не
-запускать.
+**All three scripts truncate the `items` and `outbox` tables** - do not run them
+against a production database.
 
-## Ручная проверка
+## Manual checks
 
-Три терминала: в первом `docker compose logs -f app`, во втором
-`python scripts/listen.py`, в третьем записи через `/docs` или `curl`.
+Three terminals: `docker compose logs -f app` in the first,
+`python scripts/listen.py` in the second, writes via `/docs` or `curl` in the
+third.
 
-**Событие приходит только после коммита.** Создать объект - событие появится в
-слушателе практически одновременно с ответом `201`, с пометкой вроде `+15ms`.
+**An event arrives only after the commit.** Create an object - the event shows up
+in the listener practically at the same time as the `201` response, tagged with
+something like `+15ms`.
 
-**Откат не порождает событие.** Отправь `{"name": "", "value": 1}` - получишь
-`422`, а в слушателе **ничего**. Отклонённая запись не оставила ни строки, ни
-события.
+**A rollback produces no event.** Send `{"name": "", "value": 1}` - you get
+`422`, and **nothing** in the listener. The rejected write left neither a row nor
+an event.
 
-**Порядок по одному объекту.** Создай объект и быстро измени пять раз - придут
-шесть событий с версиями 1..6, строго по возрастанию, без пропусков.
+**Ordering within one object.** Create an object and change it five times in
+quick succession - six events arrive with versions 1..6, strictly increasing,
+with no gaps.
 
-**Реконнект и догон.** Запомни последний номер, прибей слушателя, сделай пять
-записей, запусти `python scripts/listen.py --last-event-id N`. Придут ровно
-пять пропущенных, потом `[replay_complete]`, дальше живой поток. Ни `GAP`, ни
+**Reconnect and catch-up.** Note the last number, kill the listener, make five
+writes, run `python scripts/listen.py --last-event-id N`. Exactly the five missed
+events arrive, then `[replay_complete]`, then the live stream. No `GAP`, no
 `DUPLICATE`.
 
-**Автоматический реконнект.** Запусти с `--reconnect` и в другом окне сделай
-`docker compose restart app` - увидишь разрыв, переподключение и догон.
+**Automatic reconnect.** Run with `--reconnect` and in another window do
+`docker compose restart app` - you will see the drop, the reconnect and the
+catch-up.
 
-**Дедупликация.** Запусти с курсором заведомо меньше текущего - реплей выдаст
-всё после него. Запусти второй экземпляр с тем же курсором - получит то же
-самое. Это и есть at-least-once.
+**Deduplication.** Run with a cursor deliberately lower than the current one -
+the replay hands back everything after it. Run a second instance with the same
+cursor - it gets exactly the same. That is at-least-once.
 
-### Сверка с базой
+### Cross-checking against the database
 
 ```bash
 psql() { docker compose exec postgres psql -U outbox -d outbox "$@"; }
@@ -653,60 +664,62 @@ psql -c "SELECT count(*) FROM items i
          WHERE NOT EXISTS (SELECT 1 FROM outbox o WHERE o.aggregate_id = i.id)"
 ```
 
-Последний должен всегда возвращать 0: у каждого объекта есть хотя бы одно
-событие. Если нет - консистентность нарушена, и это самое важное число во всём
-проекте.
+The last one must always return 0: every object has at least one event. If it
+does not, consistency is broken, and that is the most important number in the
+whole project.
 
-## Нагрузочное тестирование
+## Load testing
 
-На запущенном сервисе, отдельным процессом:
+Against a running service, as a separate process:
 
 ```bash
-python loadtest/run_load.py --writes 5000 --concurrency 1000   # ёмкость
-python loadtest/run_load.py --writes 3000 --rate 200           # латентность
+python loadtest/run_load.py --writes 5000 --concurrency 1000   # capacity
+python loadtest/run_load.py --writes 3000 --rate 200           # latency
 ```
 
-**Closed loop** (по умолчанию) держит N запросов в полёте и идёт так быстро, как позволяет сервис - меряет
-ёмкость, а латентность в нём это время в очереди. **Open loop** (`--rate`)
-стартует запросы по расписанию независимо от того, завершились ли предыдущие -
-меряет латентность при нагрузке, которую сервис реально тянет.
+**Closed loop** (the default) keeps N requests in flight and goes as fast as the
+service allows - it measures capacity, and the latency in it is time spent
+queueing. **Open loop** (`--rate`) starts requests on a schedule regardless of
+whether earlier ones finished - it measures latency at a load the service can
+actually sustain.
 
-Каждая запись возвращает `event_id`, и то же значение приходит в событии - это
-даёт точную стыковку запроса с порождённым им событием, без угадывания по
-времени.
+Every write returns an `event_id`, and the same value arrives in the event - that
+gives an exact join between a request and the event it produced, with no guessing
+by timestamp.
 
-Publisher, tailer и retention работают на собственных соединениях, а не
-берут их из пула запросов. Под всплеском пул занят самими писателями, и фоновый
-цикл в очереди за ними добавляет ровно ту задержку, ради устранения которой
-существует: до разделения p95 был около 700 мс, после - десятки миллисекунд.
+The publisher, tailer and retention run on their own connections rather than
+borrowing from the request pool. Under a burst the pool is saturated by the
+writers themselves, and a background loop queued behind them adds exactly the
+latency it exists to remove: before the split p95 was around 700 ms, after it,
+tens of milliseconds.
 
-| Сценарий | commit → доставка p95 | Примечание |
+| Scenario | commit → delivery p95 | Note |
 | --- | --- | --- |
-| Устойчивый темп 15 записей/с | 15 мс | Бюджет 500 мс перекрыт в 30 раз |
-| 1000 одновременных записей | 5262 мс | Очередь: стенд держит 111 записей/с |
-| 1000 одновременных, сторона БД | 136 мс | insert → публикация, в бюджете |
+| Steady rate of 15 writes/s | 15 ms | The 500 ms budget beaten thirtyfold |
+| 1000 concurrent writes | 5262 ms | Queueing: the rig sustains 111 writes/s |
+| 1000 concurrent, database side | 136 ms | insert → publish, within budget |
 
-Есть и профиль для Locust - `loadtest/locustfile.py`. Он меряет только HTTP,
-потому что Locust не умеет смотреть на WebSocket, а главная метрика этого
-сервиса - commit -> доставка.
+There is also a Locust profile - `loadtest/locustfile.py`. It measures HTTP only,
+because Locust cannot look at a WebSocket, while the main metric of this service
+is commit -> delivery.
 
-## Конфигурация
+## Configuration
 
-| Переменная | По умолчанию | Примечание |
+| Variable | Default | Notes |
 | --- | --- | --- |
 | `POSTGRES_HOST` / `PORT` / `USER` / `PASSWORD` / `DB` | `postgres` / `5432` / `outbox` × 3 | |
-| `DB_POOL_MIN_SIZE` / `MAX_SIZE` | `10` / `40` | Ограничитель конкурентности записей. Помнить про три соединения на воркер вне пула |
-| `DB_COMMAND_TIMEOUT` | `10.0` | Секунды |
-| `DISPATCHER_BATCH_SIZE` | `256` | Размер пачки publisher'а |
-| `DISPATCHER_POLL_INTERVAL` | `0.2` | Страховочный поллинг - худший случай задержки, не типичный |
-| `DISPATCHER_DEBOUNCE` | `0.005` | Пауза после `NOTIFY`, схлопывает пачку в один батч |
-| `DISPATCHER_ERROR_BACKOFF` | `1.0` | Пауза после ошибки |
-| `TAILER_BATCH_SIZE` / `POLL_INTERVAL` / `DEBOUNCE` | `512` / `0.2` / `0.005` | То же для tailer'а |
+| `DB_POOL_MIN_SIZE` / `MAX_SIZE` | `10` / `40` | The real concurrency limiter for writes. Remember the three connections per worker outside the pool |
+| `DB_COMMAND_TIMEOUT` | `10.0` | Seconds |
+| `DISPATCHER_BATCH_SIZE` | `256` | Publisher batch size |
+| `DISPATCHER_POLL_INTERVAL` | `0.2` | Safety-net poll - the worst-case latency, not the typical one |
+| `DISPATCHER_DEBOUNCE` | `0.005` | Pause after `NOTIFY`, collapses a burst into one batch |
+| `DISPATCHER_ERROR_BACKOFF` | `1.0` | Pause after an error |
+| `TAILER_BATCH_SIZE` / `POLL_INTERVAL` / `DEBOUNCE` | `512` / `0.2` / `0.005` | The same for the tailer |
 | `OUTBOX_RETENTION_ENABLED` | `true` | |
-| `OUTBOX_RETENTION_HOURS` | `24` | Окно хранения = окно реконнекта клиента |
-| `OUTBOX_RETENTION_INTERVAL` / `BATCH` | `300.0` / `5000` | Частота и размер сметания |
-| `STREAM_QUEUE_SIZE` | `1000` | Очередь подписчика; переполнилась - код 4001 |
-| `STREAM_REPLAY_BATCH_SIZE` | `500` | Размер страницы при догоне |
-| `STREAM_HEARTBEAT_INTERVAL` | `30.0` | Пинг в тишине |
-| `APP_WORKERS` | `1` | Число процессов uvicorn |
+| `OUTBOX_RETENTION_HOURS` | `24` | The retention window = the client's reconnect window |
+| `OUTBOX_RETENTION_INTERVAL` / `BATCH` | `300.0` / `5000` | Sweep frequency and size |
+| `STREAM_QUEUE_SIZE` | `1000` | Subscriber queue; on overflow - code 4001 |
+| `STREAM_REPLAY_BATCH_SIZE` | `500` | Page size when catching up |
+| `STREAM_HEARTBEAT_INTERVAL` | `30.0` | Ping during silence |
+| `APP_WORKERS` | `1` | Number of uvicorn processes |
 | `LOG_LEVEL` | `INFO` | |
